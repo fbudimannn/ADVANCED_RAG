@@ -213,29 +213,17 @@ def main():
     print(f"Clean articles: {len(df_general)}")
     # --- END: NEW CLEANING BLOCK ---
 
-    # === FILTER FOR HIGH-QUALITY JOURNALS (Your list) ===
-    trusted_journals = [
-        "The Lancet", "BMJ", "JAMA", "Nature medicine", 
-        "The New England journal of medicine", "Circulation", 
-        "Journal of the American College of Cardiology"
-    ]
-    trusted_journals_lower = [j.lower() for j in trusted_journals]
-
-    df_trusted = df_general[
-        df_general['Journal'].str.lower().apply(
-            lambda j: any(j.startswith(tj) for tj in trusted_journals_lower)
-        )
-    ].copy()
-    print(f"⭐️ Filtered down to {len(df_trusted)} articles from trusted journals.")
-
-    if df_trusted.empty:
-        print("No articles from trusted journals were found. Exiting.")
+    # --- FILTER BLOCK REMOVED AS REQUESTED ---
+    
+    if df_general.empty:
+        print("No articles found after cleaning. Exiting.")
         return
 
     # --- Step 3: Convert DataFrame to LangChain Documents ---
-    print("Converting trusted articles to LangChain Document objects...")
+    print("Converting all articles to LangChain Document objects...")
     documents = []
-    for _, row in df_trusted.iterrows():
+    # MODIFIED: Use df_general instead of df_trusted
+    for _, row in df_general.iterrows(): 
         # Use the 'clean' function again for the final content
         clean_abstract = clean(row['Abstract']) 
         
@@ -259,16 +247,13 @@ def main():
         documents.append(doc)
 
     # --- Step 4: Initialize Text Splitter (Semantic Chunking) ---
-    print(f"Loading Spacy model '{SPACY_MODEL}' for semantic chunking...")
-    try:
-        nlp = spacy.load(SPACY_MODEL)
-    except OSError:
-        print(f"FATAL ERROR: Spacy model '{SPACY_MODEL}' not found.")
-        print("Please ensure it's in your requirements.txt and installed.")
-        return
-        
+    # MODIFIED: This block is fixed to solve the TypeError
+    print(f"Initializing Spacy model '{SPACY_MODEL}' for semantic chunking...")
+    
+    # SpacyTextSplitter versi baru akan otomatis me-load model
+    # menggunakan argumen 'pipeline'
     text_splitter = SpacyTextSplitter(
-        nlp=nlp,
+        pipeline=SPACY_MODEL,  # <-- INI PERBAIKANNYA (menggantikan nlp=nlp)
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP
     )
@@ -287,10 +272,11 @@ def main():
     # --- Step 6: Initialize AstraDB & Add Documents ---
     print(f"Connecting to AstraDB (Collection: {COLLECTION_NAME})...")
     vstore = AstraDBVectorStore(
+        embedding=embedding_model,
         token=ASTRA_TOKEN,
         api_endpoint=ASTRA_ENDPOINT,
         collection_name=COLLECTION_NAME,
-        embedding_dimension=EMBEDDING_DIMENSION
+        # embedding_dimension=EMBEDDING_DIMENSION
     )
     
     print("Clearing any old data from the collection...")
