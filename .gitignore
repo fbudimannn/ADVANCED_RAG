@@ -1,0 +1,44 @@
+# Folder Virtual Environment
+# Abaikan folder venv Anda yang bernama .RAG
+/.RAG/
+
+# Abaikan juga nama venv umum lainnya
+/venv/
+/.venv/
+/env/
+/.env/
+
+# File Environment
+# SANGAT PENTING: Jangan pernah mem-push API Keys Anda!
+.env
+*.env
+
+# Cache dan artefak Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Checkpoint Jupyter Notebook
+.ipynb_checkpoints
+
+# Folder cache Streamlit
+.streamlit/
+
+# Database Vector lokal
+# Jika Anda menyimpan ChromaDB ke disk, ini akan mengabaikannya
+chroma/
+chromadb/
+db/
+
+# Build dan distribusi Python
+build/
+dist/
+*.egg-info/
+
+# File spesifik sistem operasi
+.DS_Store
+Thumbs.db
+
+# File Log
+*.log
