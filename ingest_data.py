@@ -1,5 +1,4 @@
 import os
-import re
 import pandas as pd
 import spacy
 import time
@@ -8,6 +7,7 @@ from dotenv import load_dotenv
 from Bio import Entrez
 from tqdm import tqdm  # For a progress bar
 from urllib.error import HTTPError
+from dateutil import parser  # <-- ADDED for date cleaning
 
 # LangChain components
 from langchain_core.documents import Document
@@ -22,23 +22,19 @@ load_dotenv()
 print("Loaded environment variables from .env file.")
 
 # --- Required Configuration (PLEASE CHECK THESE) ---
-# Your email is needed by PubMed's API
-ENTREZ_EMAIL = "fahribudiman1721@gmail.com"  # <-- This is from your code.
-# This will be the name of your table in AstraDB
+ENTREZ_EMAIL = "fahribudiman1721@gmail.com"
 COLLECTION_NAME = "pubmed_data"
 
 # --- Embedding Model Configuration (CRITICAL) ---
-# This MUST match the model you will use in your Streamlit app.
-# "all-MiniLM-L6-v2" is a common choice with 384 dimensions.
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIMENSION = 384
+MODEL_NAME = "BAAI/bge-small-en-v1.5" # <-- Set to your model
+EMBEDDING_DIMENSION = 384             # <-- 384 is correct for bge-small
 
 # --- Semantic Chunking Configuration ---
 SPACY_MODEL = "en_core_web_sm"
-CHUNK_SIZE = 1000  # Size of chunks in tokens
-CHUNK_OVERLAP = 100  # Overlap between chunks
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 100
 
-# --- 2. HELPER FUNCTION (from your code) ---
+# --- 2. HELPER FUNCTIONS ---
 
 def fetch_with_retry(db, **kwargs):
     """
@@ -57,6 +53,22 @@ def fetch_with_retry(db, **kwargs):
             print(f"Attempt {attempt + 1} failed with {e}. Waiting {wait_time} seconds...")
             time.sleep(wait_time)
 
+def clean(txt):
+    """
+    Whitespace normalization and newline removal. (From your notebook)
+    """
+    return ' '.join(str(txt).split())
+
+def safe_parse(date_str):
+    """
+    Safely parses date strings with flexible formats. (From your notebook)
+    """
+    try:
+        # dayfirst=True so 12 05 2025 will be read as 12 May
+        return parser.parse(date_str, dayfirst=True)
+    except:
+        return pd.NaT
+
 # --- 3. MAIN DATA INGESTION FUNCTION ---
 
 def main():
@@ -71,7 +83,6 @@ def main():
     
     if not ASTRA_TOKEN or not ASTRA_ENDPOINT:
         print("FATAL ERROR: ASTRA_DB_APPLICATION_TOKEN or ASTRA_DB_API_ENDPOINT not found in .env")
-        print("Please check your .env file.")
         return
 
     # --- Step 2: PubMed Data Fetching (Using your advanced logic) ---
@@ -97,7 +108,7 @@ def main():
         ]
     }
     
-    # === DATE RANGE: Adjusted to be DYNAMIC (2023 to TODAY) ===
+    # === DATE RANGE: DYNAMIC (2023 to TODAY) ===
     today_str = datetime.now().strftime("%Y/%m/%d")
     date_range = f'("2023/01/01"[Date - Publication] : "{today_str}"[Date - Publication])'
     print(f"Set dynamic date range: 2023/01/01 to {today_str}")
@@ -112,7 +123,7 @@ def main():
     # === SEARCH PUBMED ===
     print("Searching PubMed. This may take a moment...")
     try:
-        record = fetch_with_retry(db='pubmed', retmax=10000, term=full_query) # Max 10,000 articles
+        record = fetch_with_retry(db='pubmed', retmax=10000, term=full_query)
         id_list = record['IdList']
         print(f"📥 Found {len(id_list)} total article IDs.")
     except Exception as e:
@@ -167,20 +178,40 @@ def main():
                         'Journal': journal,
                         'URL': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                     })
-
                 except KeyError as e:
-                    # Skip record if essential fields are missing
                     continue
-
         except Exception as e:
             print(f"❌ Batch {i//batch_size + 1} failed: {e}")
             continue
-
         time.sleep(1) # Polite 1-second delay per batch
 
-    # === CREATE DATAFRAMES ===
+    # === CREATE DATAFRAME ===
     df_general = pd.DataFrame(data)
     print(f"✅ Parsed {len(df_general)} valid articles with abstracts.")
+
+    # --- START: NEW CLEANING BLOCK (from your notebook) ---
+    print("Starting data cleaning process...")
+    
+    # Drop duplicates from data that has the same PMID
+    df_general.drop_duplicates('PMID', inplace=True)
+    
+    # Remove articles without abstract (redundant, but good safety check)
+    df_general = df_general[df_general['Abstract'].str.len() > 0].reset_index(drop=True)
+    
+    # Whitespace normalization
+    df_general['Abstract'] = df_general['Abstract'].apply(clean)
+    df_general['Title']    = df_general['Title'].apply(clean)
+    
+    # Date format cleaning
+    df_general['PublishedDate'] = df_general['PublishedDate'].astype(str).apply(safe_parse)
+    df_general['PublishedDate'] = pd.to_datetime(df_general['PublishedDate'], errors='coerce')
+    
+    # Replace placeholder dates
+    # NOTE: You have a hardcoded date here. This is fine for now.
+    df_general.loc[df_general['PublishedDate'] == pd.Timestamp('1900-01-01'), 'PublishedDate'] = pd.Timestamp('2025-05-01')
+    
+    print(f"Clean articles: {len(df_general)}")
+    # --- END: NEW CLEANING BLOCK ---
 
     # === FILTER FOR HIGH-QUALITY JOURNALS (Your list) ===
     trusted_journals = [
@@ -205,14 +236,22 @@ def main():
     print("Converting trusted articles to LangChain Document objects...")
     documents = []
     for _, row in df_trusted.iterrows():
-        # Clean abstract text one more time
-        clean_abstract = re.sub(r'\s+', ' ', row['Abstract']).strip()
+        # Use the 'clean' function again for the final content
+        clean_abstract = clean(row['Abstract']) 
+        
+        # Convert timestamp to string for metadata
+        date_str = row.get('PublishedDate', pd.NaT)
+        if pd.isna(date_str):
+            date_str = 'N/A'
+        else:
+            date_str = date_str.strftime('%Y-%m-%d')
+            
         doc = Document(
             page_content=clean_abstract,
             metadata={
                 "title": row.get('Title', 'N/A'),
                 "journal": row.get('Journal', 'N/A'),
-                "published_date": row.get('PublishedDate', 'N/A'),
+                "published_date": date_str,
                 "pmid": row.get('PMID', 'N/A'),
                 "source_url": row.get('URL', 'N/A')
             }
