@@ -16,67 +16,90 @@ def load_secret(key_name: str) -> str:
         st.error(f"❌ Missing secret: `{key_name}`. Please add it to .streamlit/secrets.toml.")
         st.stop()
 
-# --- 2. SETUP MODELS & DATABASE ---
-@st.cache_resource
+# --- 2. SETUP MODELS & DATABASE (Optimized for Streamlit Cloud) ---
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_models_and_db():
+    """
+    Load embedding model, reranker model (lightweight), LLM, and connect to the Vector DB.
+    Optimized to reduce memory usage.
+    """
     print("🔄 Loading models and connecting to AstraDB...")
-    embedder = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5", model_kwargs={'device': 'cpu'})
-    reranker = CrossEncoder("BAAI/bge-reranker-large", max_length=512, device='cpu')
+
+    # Lightweight embedding model
+    embedder = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
+
+    # ✅ Lightweight Reranker (faster & smaller)
+    reranker = CrossEncoder(
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        max_length=512,
+        device='cpu'
+    )
+
+    # ✅ Load LLM (via OpenRouter)
     llm = ChatOpenAI(
         api_key=load_secret("OPENROUTER_API_KEY"),
         model="mistralai/mistral-7b-instruct:free",
         base_url="https://openrouter.ai/api/v1"
     )
+
+    # ✅ AstraDB connection
     vstore = AstraDBVectorStore(
         embedding=embedder,
         collection_name="pubmed_data",
         token=load_secret("ASTRA_DB_APPLICATION_TOKEN"),
         api_endpoint=load_secret("ASTRA_DB_API_ENDPOINT"),
     )
-    retriever = vstore.as_retriever(search_kwargs={"k": 20})
+
+    # ✅ Reduce retrieved docs for lighter reranking
+    retriever = vstore.as_retriever(search_kwargs={"k": 10})
+
     print("✅ Models and database connected successfully.")
     return llm, reranker, retriever, vstore
 
 
 # --- 3. RAG PIPELINE ---
 def format_docs(docs):
+    """Format top documents for LLM input."""
     return "\n\n".join(
         f"--- Start of Context (Source) ---\n"
         f"PMID: {doc.metadata.get('pmid', 'N/A')}\n"
         f"Title: {doc.metadata.get('title', 'N/A')}\n"
         f"Journal: {doc.metadata.get('journal', 'N/A')}\n"
         f"Published Date: {doc.metadata.get('published_date', 'N/A')}\n"
-        f"Abstract:\n{doc.page_content}\n"
+        f"Abstract:\n{doc.page_content[:800]}\n"
         f"--- End of Context (Source) ---"
         for doc in docs
     )
 
 def run_rag_pipeline(query, llm, reranker, retriever):
-    with st.spinner("🔍 Retrieving relevant research..."):
+    """Retrieve, rerank, and generate answer."""
+    with st.spinner("🔍 Retrieving relevant studies..."):
         retrieved_docs = retriever.invoke(query)
 
-    with st.spinner("⚖️ Reranking top results..."):
+    with st.spinner("⚖️ Reranking best results..."):
         pairs = [[query, doc.page_content] for doc in retrieved_docs]
         rerank_scores = reranker.predict(pairs)
         scored_docs = zip(retrieved_docs, rerank_scores)
         sorted_docs = sorted(scored_docs, key=lambda x: x[1], reverse=True)
         top_5_docs = [doc for doc, score in sorted_docs[:5]]
 
-    with st.spinner("🧠 Generating evidence-based response..."):
+    with st.spinner("🧠 Generating an evidence-based response..."):
         context = format_docs(top_5_docs)
+
         prompt_template = """[INST]
 **Important Disclaimer:** This information is for educational and informational purposes only and does not constitute medical advice. Always consult a qualified healthcare professional for diagnosis and treatment.
 
-You are a clinical assistant specializing in interpreting recent scientific findings. Provide accurate, context-grounded, evidence-based responses.
-
-**Task:** Answer the medical question *solely* based on the provided research context.
+You are a clinical assistant interpreting scientific findings. Provide accurate, evidence-based responses grounded solely in the provided context.
 
 **Instructions:**
-1. Use ONLY the context below. No speculation or outside data.
-2. Be concise and clear.
-3. If insufficient information, state so.
+1. Use ONLY the context below. No speculation or outside knowledge.
+2. Be concise and precise.
+3. If insufficient information, say so clearly.
 4. Cite with PMID and Title.
-5. Answer in one short paragraph.
+5. Respond in one concise paragraph.
 
 ---
 **Question:**
@@ -88,40 +111,46 @@ You are a clinical assistant specializing in interpreting recent scientific find
 ---
 **Answer:**
 [/INST]"""
+
         prompt = ChatPromptTemplate.from_template(prompt_template)
+
         rag_chain = (
             {"context": RunnablePassthrough(), "question": RunnablePassthrough()}
             | prompt
             | llm
             | StrOutputParser()
         )
+
         answer = rag_chain.invoke({"context": context, "question": query})
+
     return answer, top_5_docs
 
 
 # --- 4. STREAMLIT UI ---
 st.set_page_config(page_title="Cardio RAG", page_icon="🩺", layout="wide")
 
-# Custom CSS for clean chat look
+# ✅ Light CSS theme for clean design
 st.markdown("""
 <style>
 body { background-color: #f8fafc; }
 .user-bubble {
-    background-color: #e3f2fd; padding: 10px 14px; border-radius: 12px; 
-    border-left: 4px solid #2196f3; margin: 8px 0; font-size: 16px;
+    background-color: #e3f2fd;
+    padding: 10px 14px; border-radius: 12px; 
+    border-left: 4px solid #2196f3; margin: 8px 0;
 }
 .assistant-bubble {
-    background-color: #f1f8e9; padding: 10px 14px; border-radius: 12px; 
-    border-left: 4px solid #7cb342; margin: 8px 0; font-size: 16px;
+    background-color: #f1f8e9;
+    padding: 10px 14px; border-radius: 12px; 
+    border-left: 4px solid #7cb342; margin: 8px 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# Sidebar
+# Sidebar info
 with st.sidebar:
     st.header("💡 About Cardio RAG")
     st.markdown("""
-    An AI-powered **Medical Research Assistant** specialized in:
+    AI-powered **Medical Research Assistant** for:
     - 🫀 Cardiovascular Diseases  
     - 🧠 Stroke  
     - 💉 Diabetes  
@@ -129,13 +158,13 @@ with st.sidebar:
     **Powered by:**
     - LangChain + AstraDB  
     - Mistral-7B (OpenRouter)  
-    - BGE-Reranker-Large  
+    - MiniLM Reranker  
     """)
     st.divider()
     if st.button("🧹 Clear Chat History"):
         st.session_state.messages = []
-        st.experimental_rerun()
-    st.caption("⚠️ This tool is for educational use only — not a medical substitute.")
+        st.rerun()
+    st.caption("⚠️ Educational use only — not a medical diagnostic tool.")
 
 st.title("🩺 Cardio RAG – Medical Research Assistant")
 st.caption("Evidence-based answers generated from PubMed clinical research.")
@@ -147,48 +176,45 @@ except Exception as e:
     st.error(f"❌ Failed to load models or connect to database: {e}")
     st.stop()
 
-# Session memory
+# Session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display past messages
+# Display chat history
 for msg in st.session_state.messages:
     role = msg["role"]
-    content = msg["content"]
     css_class = "user-bubble" if role == "user" else "assistant-bubble"
     avatar = "🧑‍⚕️" if role == "user" else "🤖"
     with st.chat_message(role, avatar=avatar):
-        st.markdown(f"<div class='{css_class}'>{content}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='{css_class}'>{msg['content']}</div>", unsafe_allow_html=True)
 
-# Input chat
+# Handle new query
 if query := st.chat_input("Ask a question about CVD, Stroke, or Diabetes..."):
     st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("user", avatar="🧑‍⚕️"):
         st.markdown(f"<div class='user-bubble'>{query}</div>", unsafe_allow_html=True)
 
     with st.chat_message("assistant", avatar="🤖"):
-        with st.spinner("Analyzing your question..."):
-            try:
-                answer, sources = run_rag_pipeline(query, llm, reranker, retriever)
-                st.markdown(f"<div class='assistant-bubble'>{answer}</div>", unsafe_allow_html=True)
+        try:
+            answer, sources = run_rag_pipeline(query, llm, reranker, retriever)
+            st.markdown(f"<div class='assistant-bubble'>{answer}</div>", unsafe_allow_html=True)
 
-                # 🔽 Expandable detailed source info (Top 5)
-                with st.expander("📚 Show Sources Used (Top 5 Reranked Results)"):
-                    for i, doc in enumerate(sources):
-                        st.markdown(f"### 🔹 Source {i+1}: {doc.metadata.get('title', 'N/A')}")
-                        st.write(f"**PMID:** {doc.metadata.get('pmid', 'N/A')}")
-                        st.write(f"**Journal:** {doc.metadata.get('journal', 'N/A')}")
-                        st.write(f"**Date:** {doc.metadata.get('published_date', 'N/A')}")
-                        source_url = doc.metadata.get("source_url", None)
-                        if source_url:
-                            st.markdown(f"[🔗 View Article]({source_url})")
-                        st.caption(doc.page_content[:300] + "…")
-                        st.divider()
+            # 📚 Show top sources (dropdown)
+            with st.expander("📚 Show Top 5 Sources Used"):
+                for i, doc in enumerate(sources):
+                    st.markdown(f"### 🔹 Source {i+1}: {doc.metadata.get('title', 'N/A')}")
+                    st.write(f"**PMID:** {doc.metadata.get('pmid', 'N/A')}")
+                    st.write(f"**Journal:** {doc.metadata.get('journal', 'N/A')}")
+                    st.write(f"**Date:** {doc.metadata.get('published_date', 'N/A')}")
+                    if doc.metadata.get("source_url"):
+                        st.markdown(f"[🔗 View Article]({doc.metadata.get('source_url')})")
+                    st.caption(doc.page_content[:150] + "…")
+                    st.divider()
 
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.session_state.messages.append({"role": "assistant", "content": answer})
 
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": f"Sorry, an error occurred: {e}"}
-                )
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+            st.session_state.messages.append(
+                {"role": "assistant", "content": f"Sorry, an error occurred: {e}"}
+            )
