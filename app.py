@@ -167,7 +167,7 @@ with st.sidebar:
     st.caption("⚠️ Educational use only — not a medical diagnostic tool.")
 
 st.title("🩺 Cardio RAG – Medical Research Assistant")
-st.caption("Evidence-based answers generated from PubMed clinical research.")
+st.caption("Evidence-based answers generated from PubMed clinical research by Fakhri.")
 
 # Load backend
 try:
