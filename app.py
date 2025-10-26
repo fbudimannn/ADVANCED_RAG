@@ -31,14 +31,14 @@ def load_models_and_db():
         model_kwargs={'device': 'cpu'}
     )
 
-    # ✅ Lightweight Reranker (faster & smaller)
+    # ✅ Lightweight Reranker
     reranker = CrossEncoder(
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
         max_length=512,
         device='cpu'
     )
 
-    # ✅ Load LLM (via OpenRouter)
+    # ✅ LLM via OpenRouter
     llm = ChatOpenAI(
         api_key=load_secret("OPENROUTER_API_KEY"),
         model="mistralai/mistral-7b-instruct:free",
@@ -53,9 +53,7 @@ def load_models_and_db():
         api_endpoint=load_secret("ASTRA_DB_API_ENDPOINT"),
     )
 
-    # ✅ Reduce retrieved docs for lighter reranking
     retriever = vstore.as_retriever(search_kwargs={"k": 10})
-
     print("✅ Models and database connected successfully.")
     return llm, reranker, retriever, vstore
 
@@ -74,17 +72,19 @@ def format_docs(docs):
         for doc in docs
     )
 
+
 def run_rag_pipeline(query, llm, reranker, retriever):
-    """Retrieve, rerank, and generate answer."""
+    """Retrieve, rerank, and generate an answer."""
     with st.spinner("🔍 Retrieving relevant studies..."):
         retrieved_docs = retriever.invoke(query)
 
     with st.spinner("⚖️ Reranking best results..."):
         pairs = [[query, doc.page_content] for doc in retrieved_docs]
         rerank_scores = reranker.predict(pairs)
-        scored_docs = zip(retrieved_docs, rerank_scores)
+        scored_docs = list(zip(retrieved_docs, rerank_scores))
         sorted_docs = sorted(scored_docs, key=lambda x: x[1], reverse=True)
         top_5_docs = [doc for doc, score in sorted_docs[:5]]
+        top_5_scores = [score for doc, score in sorted_docs[:5]]
 
     with st.spinner("🧠 Generating an evidence-based response..."):
         context = format_docs(top_5_docs)
@@ -123,13 +123,14 @@ You are a clinical assistant interpreting scientific findings. Provide accurate,
 
         answer = rag_chain.invoke({"context": context, "question": query})
 
-    return answer, top_5_docs
+    # ✅ Return both docs and their scores
+    return answer, list(zip(top_5_docs, top_5_scores))
 
 
 # --- 4. STREAMLIT UI ---
 st.set_page_config(page_title="Cardio RAG", page_icon="🩺", layout="wide")
 
-# ✅ Light CSS theme for clean design
+# ✅ Light CSS theme
 st.markdown("""
 <style>
 body { background-color: #f8fafc; }
@@ -180,15 +181,31 @@ except Exception as e:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
+# --- Display Chat History (with Sources) ---
 for msg in st.session_state.messages:
     role = msg["role"]
     css_class = "user-bubble" if role == "user" else "assistant-bubble"
     avatar = "🧑‍⚕️" if role == "user" else "🤖"
+
     with st.chat_message(role, avatar=avatar):
         st.markdown(f"<div class='{css_class}'>{msg['content']}</div>", unsafe_allow_html=True)
 
-# Handle new query
+        # ✅ Show previous sources if available
+        if role == "assistant" and "sources" in msg and msg["sources"]:
+            with st.expander("📚 Show Top 5 Sources Used"):
+                for i, (doc, score) in enumerate(msg["sources"]):
+                    st.markdown(f"### 🔹 Source {i+1}: {doc.metadata.get('title', 'N/A')}")
+                    st.write(f"**Confidence Score:** {score:.2f}")
+                    st.progress(min(max(score / 5, 0), 1))  # simple score bar
+                    st.write(f"**PMID:** {doc.metadata.get('pmid', 'N/A')}")
+                    st.write(f"**Journal:** {doc.metadata.get('journal', 'N/A')}")
+                    st.write(f"**Date:** {doc.metadata.get('published_date', 'N/A')}")
+                    if doc.metadata.get("source_url"):
+                        st.markdown(f"[🔗 View Article]({doc.metadata.get('source_url')})")
+                    st.caption(doc.page_content[:150] + "…")
+                    st.divider()
+
+# --- Handle New Query ---
 if query := st.chat_input("Ask a question about CVD, Stroke, or Diabetes..."):
     st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("user", avatar="🧑‍⚕️"):
@@ -199,10 +216,12 @@ if query := st.chat_input("Ask a question about CVD, Stroke, or Diabetes..."):
             answer, sources = run_rag_pipeline(query, llm, reranker, retriever)
             st.markdown(f"<div class='assistant-bubble'>{answer}</div>", unsafe_allow_html=True)
 
-            # 📚 Show top sources (dropdown)
+            # 📚 Display sources with confidence scores
             with st.expander("📚 Show Top 5 Sources Used"):
-                for i, doc in enumerate(sources):
+                for i, (doc, score) in enumerate(sources):
                     st.markdown(f"### 🔹 Source {i+1}: {doc.metadata.get('title', 'N/A')}")
+                    st.write(f"**Confidence Score:** {score:.2f}")
+                    st.progress(min(max(score / 5, 0), 1))
                     st.write(f"**PMID:** {doc.metadata.get('pmid', 'N/A')}")
                     st.write(f"**Journal:** {doc.metadata.get('journal', 'N/A')}")
                     st.write(f"**Date:** {doc.metadata.get('published_date', 'N/A')}")
@@ -211,10 +230,15 @@ if query := st.chat_input("Ask a question about CVD, Stroke, or Diabetes..."):
                     st.caption(doc.page_content[:150] + "…")
                     st.divider()
 
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+            # ✅ Save both answer and sources to session
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources
+            })
 
         except Exception as e:
             st.error(f"❌ Error: {e}")
             st.session_state.messages.append(
-                {"role": "assistant", "content": f"Sorry, an error occurred: {e}"}
+                {"role": "assistant", "content": f"Sorry, an error occurred: {e}", "sources": []}
             )
