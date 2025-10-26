@@ -42,3 +42,6 @@ Thumbs.db
 
 # File Log
 *.log
+
+
+.streamlit/secrets.toml
