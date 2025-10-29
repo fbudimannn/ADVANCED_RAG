@@ -1,0 +1,45 @@
+# Workflow name, visible in the GitHub "Actions" tab
+name: Scheduled Data Ingestion
+
+# --- Workflow Triggers ---
+on:
+  # Allows manual execution from the GitHub UI
+  workflow_dispatch:
+  
+  # Defines the automated schedule
+  schedule:
+    # Runs every Sunday at 3:00 AM UTC
+    # (Use crontab.guru to modify the schedule)
+    - cron: '0 3 * * 0'
+
+jobs:
+  ingest-data:
+    # Specifies the job runner (GitHub-hosted Ubuntu)
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out the repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up the correct Python version (3.11)
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install all required dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # 4. Execute the data ingestion script
+      - name: Run data ingestion script
+        run: python ingest_data.py
+        env:
+          # Pass GitHub Secrets to environment variables
+          # Required for the script to authenticate
+          ASTRA_DB_APPLICATION_TOKEN: ${{ secrets.ASTRA_DB_APPLICATION_TOKEN }}
+          ASTRA_DB_API_ENDPOINT: ${{ secrets.ASTRA_DB_API_ENDPOINT }}
+          # (Add other secrets needed by ingest_data.py here)
